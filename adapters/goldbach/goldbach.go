@@ -1,7 +1,7 @@
 package goldbach
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -13,70 +13,92 @@ import (
 	"github.com/prebid/prebid-server/v3/util/jsonutil"
 )
 
-/*
-Bid adapter implements and exports the requirements:
-
-- The adapters.Builder method to create a new instance of the adapter based on
-  the host configuration
-
-- The adapters.Bidder interface consisting of the MakeRequests method to create
-  outgoing requests to your bidding server and the MakeBids method to create bid
-  responses.
-*/
-
 type adapter struct {
 	endpoint string
 }
 
-// Builder builds a new instance of the Goldbach adapter for the given bidder with the given config.
+type impExtAdapter struct {
+	Goldbach openrtb_ext.ImpExtGoldbach `json:"goldbach"`
+}
+
 func Builder(bidderName openrtb_ext.BidderName, config config.Adapter, server config.Server) (adapters.Bidder, error) {
+	if config.Endpoint == "" {
+		return nil, errors.New("missing endpoint adapter parameter")
+	}
+
 	bidder := &adapter{
 		endpoint: config.Endpoint,
 	}
 	return bidder, nil
 }
 
-/*
-This method creates an HTTP requests that should be sent to the Goldbach OpenRTB endpoint.
-It's only provided with valid impressions for the adapter, it's not called if there is none.
-For optimization purposes bid adapters are forbidden from directly initiating any form of
-network communication and must entirely rely upon the core framework (adapters.RequestData).
-*/
 func (a *adapter) MakeRequests(request *openrtb2.BidRequest, reqInfo *adapters.ExtraRequestInfo) ([]*adapters.RequestData, []error) {
-	headers := http.Header{}
-	headers.Add("Content-Type", "application/json;charset=utf-8")
-	headers.Add("Accept", "application/json")
+	var reqs []*adapters.RequestData
+	var errs []error
 
-	resJSON, err := json.Marshal(request)
-	if err != nil {
-		return nil, []error{fmt.Errorf("Error while encoding OpenRTB BidRequest: %v", err)}
+	// group impressions by publisher ID
+	publisherImps := make(map[string][]openrtb2.Imp)
+	for _, imp := range request.Imp {
+		extImp, err := getImpressionExt(&imp)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		impCopy := imp
+
+		impCopy.Ext, err = jsonutil.Marshal(&impExtAdapter{
+			Goldbach: *extImp,
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("error while encoding impression ext: %v", err))
+			continue
+		}
+
+		publisherImps[extImp.PublisherID] = append(publisherImps[extImp.PublisherID], impCopy)
 	}
 
-	reqs := []*adapters.RequestData{
-		{
+	if len(publisherImps) == 0 {
+		return nil, []error{errors.New("no publisher ID found in impressions")}
+	}
+
+	// create a separate request for each publisher
+	for publisherID, imps := range publisherImps {
+		requestPublisher := *request
+		requestPublisher.Imp = imps
+		requestPublisher.ID = fmt.Sprintf("%s_%s", request.ID, publisherID)
+
+		resJSON, err := jsonutil.Marshal(&requestPublisher)
+		if err != nil {
+			return nil, []error{fmt.Errorf("error while encoding OpenRTB BidRequest: %v", err)}
+		}
+
+		headers := http.Header{}
+		headers.Add("Content-Type", "application/json;charset=utf-8")
+		headers.Add("Accept", "application/json")
+
+		req := &adapters.RequestData{
 			Method:  "POST",
 			Uri:     a.endpoint,
 			Body:    resJSON,
 			Headers: headers,
-			ImpIDs:  openrtb_ext.GetImpIDs(request.Imp),
-		},
+			ImpIDs:  openrtb_ext.GetImpIDs(requestPublisher.Imp),
+		}
+
+		reqs = append(reqs, req)
 	}
 
-	return reqs, nil
+	return reqs, errs
 }
 
-/*
-This method is called for every Bid Response from Goldbach's OpenRTB endpoint.
-It maps the responses to core framework's OpenRTB 2.5 Bid Response object model.
-*/
 func (a *adapter) MakeBids(bidReq *openrtb2.BidRequest, unused *adapters.RequestData, httpRes *adapters.ResponseData) (*adapters.BidderResponse, []error) {
 	if httpRes.StatusCode == http.StatusNoContent {
 		return nil, nil
 	}
 
-	if httpRes.StatusCode != http.StatusOK {
+	if httpRes.StatusCode != http.StatusCreated {
 		return nil, []error{
-			fmt.Errorf("Unexpected status code: %d. Run with request.debug = 1 for more info", httpRes.StatusCode),
+			fmt.Errorf("unexpected status code: %d. Run with request.debug = 1 for more info", httpRes.StatusCode),
 		}
 	}
 
@@ -89,14 +111,58 @@ func (a *adapter) MakeBids(bidReq *openrtb2.BidRequest, unused *adapters.Request
 
 	bidderResponse := adapters.NewBidderResponse()
 	bidderResponse.Currency = resp.Cur
+
+	var errs []error
 	for _, sb := range resp.SeatBid {
 		for i := range sb.Bid {
+			bidType, err := getBidMediaType(&sb.Bid[i])
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+
 			bidderResponse.Bids = append(bidderResponse.Bids, &adapters.TypedBid{
 				Bid:     &sb.Bid[i],
-				BidType: openrtb_ext.BidTypeBanner,
+				BidType: bidType,
 			})
 		}
 	}
 
-	return bidderResponse, nil
+	return bidderResponse, errs
+}
+
+func getImpressionExt(imp *openrtb2.Imp) (*openrtb_ext.ImpExtGoldbach, error) {
+	var extImpBidder adapters.ExtImpBidder
+	if err := jsonutil.Unmarshal(imp.Ext, &extImpBidder); err != nil {
+		return nil, &errortypes.BadInput{
+			Message: "missing ext",
+		}
+	}
+
+	var goldbachExt openrtb_ext.ImpExtGoldbach
+	if err := jsonutil.Unmarshal(extImpBidder.Bidder, &goldbachExt); err != nil {
+		return nil, &errortypes.BadInput{
+			Message: "missing ext.bidder",
+		}
+	}
+
+	if len(goldbachExt.PublisherID) == 0 || len(goldbachExt.SlotID) == 0 {
+		return nil, &errortypes.BadInput{
+			Message: "publisher_id and slot_id are required",
+		}
+	}
+	return &goldbachExt, nil
+}
+
+func getBidMediaType(bid *openrtb2.Bid) (openrtb_ext.BidType, error) {
+	var extBid openrtb_ext.ExtBid
+	if err := jsonutil.Unmarshal(bid.Ext, &extBid); err != nil {
+		return "", fmt.Errorf("unable to deserialize imp %v bid.ext", bid.ImpID)
+	}
+
+	if extBid.Prebid == nil {
+		return "", fmt.Errorf("imp %v with unknown media type", bid.ImpID)
+	}
+
+	return extBid.Prebid.Type, nil
 }

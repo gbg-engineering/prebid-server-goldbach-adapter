@@ -9,8 +9,9 @@
           "pos": 0
         },
         "ext": {
-          "goldbach": {
-            "slotId": "12345678/de-example.ch/slot-id/some-page"
+          "bidder": {
+            "slotId": "12345678/de-example.ch/slot-id/some-page",
+            "publisherId": "de-example.ch"
           }
         }
       }
@@ -21,12 +22,7 @@
     "device": {
       "ua": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36"
     },
-    "id": "723f8906-7f59-4f50-bba9-ed9115ab1663",
-    "ext": {
-      "goldbach": {
-        "publisherId": "de-example.ch_pbjs"
-      }
-    }
+    "id": "723f8906-7f59-4f50-bba9-ed9115ab1663"
   },
   "httpCalls": [
     {
@@ -45,7 +41,8 @@
             {
               "ext": {
                 "goldbach": {
-                  "slotId": "12345678/de-example.ch/slot-id/some-page"
+                  "slotId": "12345678/de-example.ch/slot-id/some-page",
+                  "publisherId": "de-example.ch"
                 }
               },
               "id": "test-imp-123",
@@ -62,12 +59,7 @@
           "device": {
             "ua": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36"
           },
-          "id": "723f8906-7f59-4f50-bba9-ed9115ab1663",
-          "ext": {
-            "goldbach": {
-              "publisherId": "de-example.ch_pbjs"
-            }
-          }
+          "id": "723f8906-7f59-4f50-bba9-ed9115ab1663_de-example.ch"
         },
         "impIDs": [
           "test-imp-123"
